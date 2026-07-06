@@ -1,3 +1,4 @@
+
 const express      = require("express");
 const cors         = require("cors");
 const twilio       = require("twilio");
@@ -189,7 +190,7 @@ const validateTwilio = process.env.TWILIO_VALIDATE !== "false";
 app.post("/webhook", (req, res, next) => {
   console.log("Webhook hit | From:", req.body.From || "(none)", "| signature:", req.headers["x-twilio-signature"] ? "present" : "MISSING", "| url seen as:", req.protocol + "://" + req.get("host") + req.originalUrl);
   next();
-}, twilio.webhook({ authToken: authToken, validate: validateTwilio }), async (req, res) => {
+}, twilio.webhook({ validate: validateTwilio }, authToken), async (req, res) => {
   const from = req.body.From || "";
   let message = (req.body.Body || "").trim();
   // Media-only messages (images, voice notes) have no Body — store a
@@ -931,3 +932,4 @@ app.get("/dashboard", (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
 // v2.1 — draft preservation fix
+ 
