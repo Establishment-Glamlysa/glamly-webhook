@@ -1,4 +1,3 @@
-
 const express      = require("express");
 const cors         = require("cors");
 const twilio       = require("twilio");
@@ -163,21 +162,92 @@ function loginLimiter(req, res, next) {
 // ---------------------------------------------------------------------------
 // Bot
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Bot FAQ — edit the answer texts below to match your real policies
+// (especially payment methods and refund timelines).
+// getBotReply always returns { reply, handoff }:
+//   reply   -> text sent back to the customer
+//   handoff -> true = also flag the conversation as 'pending' for an agent
+// ---------------------------------------------------------------------------
+const MENU_OPTIONS =
+  "1- Booking status | حالة الحجز\n" +
+  "2- Cancel or reschedule | إلغاء أو تعديل الحجز\n" +
+  "3- Prices & services | الأسعار والخدمات\n" +
+  "4- Payment methods | طرق الدفع\n" +
+  "5- Refunds | استرداد المبلغ\n" +
+  "6- Gift cards | بطاقات الهدايا\n" +
+  "7- Talk to an agent | التحدث مع موظف";
+ 
+const WELCOME_MENU =
+  "Welcome to Glamly!\nأهلاً بك في Glamly!\n\n" + MENU_OPTIONS;
+ 
 function getBotReply(message) {
   const msg = message.toLowerCase().trim();
-  if (msg === "1" || msg.includes("booking") || msg.includes("status") || msg.includes("حجز") || msg.includes("حالة"))
-    return "Please share your booking ID and we will check it for you!\n\nأرسل رقم حجزك وسنتحقق منه فوراً!";
-  if (msg === "2" || msg.includes("cancel") || msg.includes("إلغاء") || msg.includes("الغ"))
-    return "To cancel your booking please share your booking ID.\n\nCancellations made 24hrs before are fully refunded.\n\nلإلغاء حجزك أرسل رقم الحجز.\nالإلغاء قبل 24 ساعة يحصل على استرداد كامل.";
-  if (msg === "3" || msg.includes("price") || msg.includes("سعر") || msg.includes("كم") || msg.includes("تكلفة"))
-    return "Browse all prices in the Glamly app!\n\nglamlysa.com\n\nتصفح جميع الأسعار في تطبيق Glamly!\nglamlysa.com";
-  if (msg === "4" || msg.includes("agent") || msg.includes("human") || msg.includes("موظف") || msg.includes("مساعدة"))
-    return "Connecting you to an agent now. Please wait!\n\nجاري تحويلك لموظف. لحظة من فضلك!";
-  if (msg.includes("hello") || msg.includes("hi") || msg.includes("مرحبا") || msg.includes("هلا") || msg.includes("اهلا") || msg.includes("السلام"))
-    return "Welcome to Glamly!\nأهلاً بك في Glamly!\n\n1- Booking status\n2- Cancel booking\n3- Prices\n4- Talk to agent";
-  if (msg.includes("thank") || msg.includes("شكر") || msg.includes("شكراً"))
-    return "You're most welcome!\nعلى الرحب والسعة!\n\nGlamly";
-  return null;
+  const has = (...words) => words.some(w => msg.includes(w));
+ 
+  // 7 - Agent (checked first so "agent" requests always win)
+  if (msg === "7" || has("agent", "human", "support", "staff", "موظف", "مساعدة", "خدمة العملاء"))
+    return {
+      reply: "Connecting you to an agent now. Please wait!\n\nجاري تحويلك لموظف. لحظة من فضلك!",
+      handoff: true
+    };
+ 
+  // 1 - Booking status
+  if (msg === "1" || has("booking", "status", "appointment", "حجز", "حالة", "موعدي"))
+    return {
+      reply: "Please share your booking ID and an agent will check it for you right away!\n\nأرسل رقم حجزك وسيتحقق منه أحد الموظفين فوراً!",
+      handoff: true
+    };
+ 
+  // 2 - Cancel / reschedule
+  if (msg === "2" || has("cancel", "reschedule", "إلغاء", "الغ", "تعديل", "تأجيل"))
+    return {
+      reply: "To cancel or reschedule, please share your booking ID and an agent will assist you.\n\nCancellations made 24hrs before the appointment are fully refunded.\n\nلإلغاء أو تعديل حجزك أرسل رقم الحجز وسيساعدك أحد الموظفين.\nالإلغاء قبل 24 ساعة من الموعد يحصل على استرداد كامل.",
+      handoff: true
+    };
+ 
+  // 3 - Prices & services
+  // "كم" only as a whole word — it's a substring of common words like "عليكم"
+  if (msg === "3" || has("price", "cost", "how much", "services", "سعر", "أسعار", "تكلفة") || msg.split(/\s+/).some(w => w === "كم" || w === "بكم"))
+    return {
+      reply: "Browse all services and prices in the Glamly app!\n\nglamlysa.com\n\nتصفح جميع الخدمات والأسعار في تطبيق Glamly!\nglamlysa.com",
+      handoff: false
+    };
+ 
+  // 4 - Payment methods  (EDIT: confirm these match what you actually accept)
+  if (msg === "4" || has("pay", "payment", "mada", "apple pay", "دفع", "مدى", "فيزا", "بطاقة ائتمان"))
+    return {
+      reply: "You can pay securely in the Glamly app using mada, Visa/Mastercard, or Apple Pay.\n\nيمكنك الدفع بأمان في تطبيق Glamly عبر مدى أو فيزا/ماستركارد أو Apple Pay.",
+      handoff: false
+    };
+ 
+  // 5 - Refunds
+  if (msg === "5" || has("refund", "money back", "استرداد", "استرجاع"))
+    return {
+      reply: "Cancellations made 24hrs or more before the appointment are fully refunded. Refunds are processed within 3-5 business days to your original payment method.\n\nالإلغاء قبل 24 ساعة أو أكثر من الموعد يحصل على استرداد كامل. تتم معالجة الاسترداد خلال 3-5 أيام عمل إلى نفس وسيلة الدفع.",
+      handoff: false
+    };
+ 
+  // 6 - Gift cards
+  if (msg === "6" || has("gift", "هدية", "هدايا", "اهداء", "إهداء"))
+    return {
+      reply: "You can gift any service from the Glamly app! Your friend instantly receives their gift on WhatsApp with a link to book their appointment.\n\nيمكنك إهداء أي خدمة من تطبيق Glamly! تصل الهدية فوراً عبر واتساب مع رابط لحجز الموعد.",
+      handoff: false
+    };
+ 
+  // Greetings -> show the menu
+  if (has("hello", "hi", "hey", "مرحبا", "هلا", "اهلا", "أهلا", "السلام"))
+    return { reply: WELCOME_MENU, handoff: false };
+ 
+  // Thanks
+  if (has("thank", "شكر"))
+    return { reply: "You're most welcome!\nعلى الرحب والسعة!\n\nGlamly", handoff: false };
+ 
+  // Fallback: didn't understand -> show the menu AND flag an agent
+  return {
+    reply: "Sorry, I didn't quite get that — an agent will follow up with you shortly. Meanwhile, you can pick an option:\n\nعذراً، لم أفهم رسالتك — سيتواصل معك أحد الموظفين قريباً. يمكنك أيضاً اختيار أحد الخيارات:\n\n" + MENU_OPTIONS,
+    handoff: true
+  };
 }
  
 // ---------------------------------------------------------------------------
@@ -207,28 +277,35 @@ app.post("/webhook", (req, res, next) => {
         "INSERT INTO messages (phone, sender, message) VALUES (?, 'customer', ?)",
         [from, message]
       );
-      const botReply = getBotReply(message);
-      if (botReply) {
-        await db.execute(
-          "INSERT INTO messages (phone, sender, message) VALUES (?, 'bot', ?)",
-          [from, botReply]
-        );
-        await db.execute(
-          "UPDATE conversations SET status = 'bot' WHERE phone = ?",
-          [from]
-        );
-        // Awaited so send failures are logged instead of becoming
-        // unhandled promise rejections.
-        try {
-          await client.messages.create({ from: fromNumber, to: from, body: botReply });
-        } catch (sendErr) {
-          console.error("Bot reply send failed:", sendErr.message);
-        }
-      } else {
+      // If an agent is already handling this chat (or it's waiting for one),
+      // the bot stays quiet — the message is just stored and re-flagged.
+      const [existing] = await db.execute(
+        "SELECT status FROM conversations WHERE phone = ?",
+        [from]
+      );
+      const currentStatus = existing.length ? existing[0].status : "bot";
+      if (currentStatus === "agent" || currentStatus === "pending") {
         await db.execute(
           "UPDATE conversations SET status = 'pending' WHERE phone = ?",
           [from]
         );
+      } else {
+        const bot = getBotReply(message);
+        await db.execute(
+          "INSERT INTO messages (phone, sender, message) VALUES (?, 'bot', ?)",
+          [from, bot.reply]
+        );
+        await db.execute(
+          "UPDATE conversations SET status = ? WHERE phone = ?",
+          [bot.handoff ? "pending" : "bot", from]
+        );
+        // Awaited so send failures are logged instead of becoming
+        // unhandled promise rejections.
+        try {
+          await client.messages.create({ from: fromNumber, to: from, body: bot.reply });
+        } catch (sendErr) {
+          console.error("Bot reply send failed:", sendErr.message);
+        }
       }
     }
   } catch (err) {
@@ -932,4 +1009,3 @@ app.get("/dashboard", (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
 // v2.1 — draft preservation fix
- 
