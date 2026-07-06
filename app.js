@@ -1201,6 +1201,3 @@ app.get("/dashboard", (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
 // v3.0 — bilingual bot, SSE dashboard, media, notifications, template button
- 
-
-Unable to open file.
