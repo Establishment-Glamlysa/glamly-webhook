@@ -184,48 +184,48 @@ function loginLimiter(req, res, next) {
 // ---------------------------------------------------------------------------
 const FAQ = {
   menu: {
-    en: "1️⃣ Booking status 📅\n2️⃣ Cancel or reschedule 🔄\n3️⃣ Prices & services 💅\n4️⃣ Payment methods 💳\n5️⃣ Refunds 💸\n6️⃣ Gift cards 🎁\n7️⃣ Talk to an agent 💬",
-    ar: "1️⃣ حالة الحجز 📅\n2️⃣ إلغاء أو تعديل الحجز 🔄\n3️⃣ الأسعار والخدمات 💅\n4️⃣ طرق الدفع 💳\n5️⃣ استرداد المبلغ 💸\n6️⃣ بطاقات الهدايا 🎁\n7️⃣ التحدث مع موظف 💬"
+    en: "1- Booking status\n2- Cancel or reschedule\n3- Prices & services\n4- Payment methods\n5- Refunds\n6- Gift cards\n7- Talk to an agent",
+    ar: "1- حالة الحجز\n2- إلغاء أو تعديل الحجز\n3- الأسعار والخدمات\n4- طرق الدفع\n5- استرداد المبلغ\n6- بطاقات الهدايا\n7- التحدث مع موظف"
   },
   welcome: {
-    en: "✨ Welcome to Glamly! ✨\nHow can we help you today?\n\n",
-    ar: "✨ أهلاً بك في Glamly! ✨\nكيف نقدر نساعدك اليوم؟\n\n"
+    en: "Welcome to Glamly 💜\nHow can we help you today?\n\n",
+    ar: "أهلاً بك في Glamly 💜\nكيف نقدر نساعدك اليوم؟\n\n"
   },
   agent: {
-    en: "💬 Connecting you to an agent now — one moment please! 🙏",
-    ar: "💬 جاري تحويلك لموظف — لحظة من فضلك! 🙏"
+    en: "Connecting you to an agent now — one moment please 💜",
+    ar: "جاري تحويلك لموظف — لحظة من فضلك 💜"
   },
   status: {
-    en: "📅 Please share your booking ID and an agent will check it for you right away! ⚡",
-    ar: "📅 أرسل رقم حجزك وسيتحقق منه أحد الموظفين فوراً! ⚡"
+    en: "Please share your booking ID and an agent will check it for you right away!",
+    ar: "أرسل رقم حجزك وسيتحقق منه أحد الموظفين فوراً!"
   },
   cancel: {
-    en: "🔄 To cancel or reschedule, please share your booking ID and an agent will assist you.\n\n💡 Cancellations made 24hrs before the appointment are fully refunded.",
-    ar: "🔄 لإلغاء أو تعديل حجزك أرسل رقم الحجز وسيساعدك أحد الموظفين.\n\n💡 الإلغاء قبل 24 ساعة من الموعد يحصل على استرداد كامل."
+    en: "To cancel or reschedule, please share your booking ID and an agent will assist you.\n\nCancellations made 24hrs before the appointment are fully refunded.",
+    ar: "لإلغاء أو تعديل حجزك أرسل رقم الحجز وسيساعدك أحد الموظفين.\n\nالإلغاء قبل 24 ساعة من الموعد يحصل على استرداد كامل."
   },
   prices: {
-    en: "💅 Browse all services and prices in the Glamly app!\n\n🔗 glamlysa.com ✨",
-    ar: "💅 تصفح جميع الخدمات والأسعار في تطبيق Glamly!\n\n🔗 glamlysa.com ✨"
+    en: "Browse all services and prices in the Glamly app 💜\n\nglamlysa.com",
+    ar: "تصفح جميع الخدمات والأسعار في تطبيق Glamly 💜\n\nglamlysa.com"
   },
   payment: { // EDIT: confirm these match what you actually accept
-    en: "💳 You can pay securely in the Glamly app using:\n\n• mada\n• Visa / Mastercard\n• Apple Pay 🍎",
-    ar: "💳 يمكنك الدفع بأمان في تطبيق Glamly عبر:\n\n• مدى\n• فيزا / ماستركارد\n• Apple Pay 🍎"
+    en: "You can pay securely in the Glamly app using mada, Visa/Mastercard, or Apple Pay.",
+    ar: "يمكنك الدفع بأمان في تطبيق Glamly عبر مدى أو فيزا/ماستركارد أو Apple Pay."
   },
   refund: {
-    en: "💸 Cancellations made 24hrs or more before the appointment are fully refunded.\n\n⏱️ Refunds are processed within 3-5 business days to your original payment method.",
-    ar: "💸 الإلغاء قبل 24 ساعة أو أكثر من الموعد يحصل على استرداد كامل.\n\n⏱️ تتم معالجة الاسترداد خلال 3-5 أيام عمل إلى نفس وسيلة الدفع."
+    en: "Cancellations made 24hrs or more before the appointment are fully refunded.\n\nRefunds are processed within 3-5 business days to your original payment method.",
+    ar: "الإلغاء قبل 24 ساعة أو أكثر من الموعد يحصل على استرداد كامل.\n\nتتم معالجة الاسترداد خلال 3-5 أيام عمل إلى نفس وسيلة الدفع."
   },
   gift: {
-    en: "🎁 You can gift any service from the Glamly app!\n\n💝 Your friend instantly receives their gift on WhatsApp with a link to book their appointment. ✨",
-    ar: "🎁 يمكنك إهداء أي خدمة من تطبيق Glamly!\n\n💝 تصل الهدية فوراً عبر واتساب مع رابط لحجز الموعد. ✨"
+    en: "You can gift any service from the Glamly app 🎁\n\nYour friend instantly receives their gift on WhatsApp with a link to book their appointment.",
+    ar: "يمكنك إهداء أي خدمة من تطبيق Glamly 🎁\n\nتصل الهدية فوراً عبر واتساب مع رابط لحجز الموعد."
   },
   thanks: {
-    en: "You're most welcome! 💜\n\nGlamly ✨",
-    ar: "على الرحب والسعة! 💜\n\nGlamly ✨"
+    en: "You're most welcome 💜\n\nGlamly",
+    ar: "على الرحب والسعة 💜\n\nGlamly"
   },
   fallback: {
-    en: "🤔 Sorry, I didn't quite get that — an agent will follow up with you shortly. 💬\n\nMeanwhile, you can pick an option:\n\n",
-    ar: "🤔 عذراً، لم أفهم رسالتك — سيتواصل معك أحد الموظفين قريباً. 💬\n\nيمكنك أيضاً اختيار أحد الخيارات:\n\n"
+    en: "Sorry, I didn't quite get that — an agent will follow up with you shortly.\n\nMeanwhile, you can pick an option:\n\n",
+    ar: "عذراً، لم أفهم رسالتك — سيتواصل معك أحد الموظفين قريباً.\n\nيمكنك أيضاً اختيار أحد الخيارات:\n\n"
   }
 };
  
@@ -1205,3 +1205,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
 // v2.1 — draft preservation fix
  
+
+Unable to open file.
