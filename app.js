@@ -183,7 +183,13 @@ function getBotReply(message) {
 // Twilio webhook — signature validated so only Twilio can call it.
 // (To test locally with curl, temporarily set validate: false.)
 // ---------------------------------------------------------------------------
-app.post("/webhook", twilio.webhook({ authToken: authToken, validate: true }), async (req, res) => {
+// Set env var TWILIO_VALIDATE=false to temporarily skip signature validation
+// while debugging (turn it back on afterwards!).
+const validateTwilio = process.env.TWILIO_VALIDATE !== "false";
+app.post("/webhook", (req, res, next) => {
+  console.log("Webhook hit | From:", req.body.From || "(none)", "| signature:", req.headers["x-twilio-signature"] ? "present" : "MISSING", "| url seen as:", req.protocol + "://" + req.get("host") + req.originalUrl);
+  next();
+}, twilio.webhook({ authToken: authToken, validate: validateTwilio }), async (req, res) => {
   const from = req.body.From || "";
   let message = (req.body.Body || "").trim();
   // Media-only messages (images, voice notes) have no Body — store a
@@ -704,6 +710,7 @@ app.get("/dashboard", (req, res) => {
     "var currentFilter='all';",
     "var currentLang='en';",
     "var authToken=localStorage.getItem('glamly_token')||'';",
+    "var drafts={}; // unsent reply text per conversation, survives re-renders",
     "",
     "// Escape everything that goes into innerHTML — customer messages are",
     "// attacker-controlled and were previously stored XSS in this dashboard.",
@@ -808,6 +815,10 @@ app.get("/dashboard", (req, res) => {
     "}",
     "",
     "function openConversation(number){",
+    "  // Save the draft + focus state before the re-render wipes the textarea",
+    "  var prevInput=document.getElementById('replyInput');",
+    "  if(prevInput && activeNumber) drafts[activeNumber]=prevInput.value;",
+    "  var keepFocus=prevInput && document.activeElement===prevInput && activeNumber===number;",
     "  activeNumber=number;",
     "  var data=conversations[number];",
     "  var num=number.replace('whatsapp:+','');",
@@ -834,6 +845,12 @@ app.get("/dashboard", (req, res) => {
     "    '<div class=\"quick-replies\"><div class=\"qr-label\">Quick replies:</div>'+qrHtml+'</div>'+",
     "    '<div class=\"reply-box\"><textarea id=\"replyInput\" placeholder=\"Type your reply...\" onkeydown=\"if(event.key===\\'Enter\\' && !event.shiftKey){event.preventDefault();sendReply();}\"></textarea><button class=\"send-btn\" onclick=\"sendReply()\">Send</button></div>';",
     "",
+    "  // Restore the draft (and cursor) after the re-render",
+    "  var newInput=document.getElementById('replyInput');",
+    "  if(newInput){",
+    "    newInput.value=drafts[number]||'';",
+    "    if(keepFocus){ newInput.focus(); newInput.selectionStart=newInput.selectionEnd=newInput.value.length; }",
+    "  }",
     "  document.getElementById('messages').scrollTop=99999;",
     "  renderList();",
     "}",
@@ -848,17 +865,20 @@ app.get("/dashboard", (req, res) => {
     "  var message=input.value.trim();",
     "  if(!message || !activeNumber) return;",
     "  input.value='';",
+    "  drafts[activeNumber]='';",
     "  fetch('/reply',{method:'POST',headers:authHeaders(),body:JSON.stringify({to:activeNumber.replace('whatsapp:+',''),message:message})})",
     "    .then(function(res){ return res.json(); })",
     "    .then(function(data){",
     "      if(data && data.error){",
     "        alert(data.error);",
-    "        input.value=message; // restore so the agent doesn't lose the draft",
+    "        drafts[activeNumber]=message;",
+    "        var inp=document.getElementById('replyInput');",
+    "        if(inp) inp.value=message; // restore so the agent doesn't lose the draft",
     "        return;",
     "      }",
     "      return loadConversations().then(function(){ openConversation(activeNumber); });",
     "    })",
-    "    .catch(function(){ alert('Failed to send message'); input.value=message; });",
+    "    .catch(function(){ alert('Failed to send message'); drafts[activeNumber]=message; var inp=document.getElementById('replyInput'); if(inp) inp.value=message; });",
     "}",
     "",
     "function markResolved(number){",
@@ -910,5 +930,4 @@ app.get("/dashboard", (req, res) => {
  
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
- 
-
+// v2.1 — draft preservation fix
