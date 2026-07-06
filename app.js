@@ -1,24 +1,80 @@
+
+Server · JS
 const express      = require("express");
-const bodyParser   = require("body-parser");
 const cors         = require("cors");
 const twilio       = require("twilio");
 const mysql        = require("mysql2/promise");
 const jwt          = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
-
+const crypto       = require("crypto");
+ 
+// ---------------------------------------------------------------------------
+// Configuration — fail fast instead of falling back to insecure defaults.
+// GIFT_API_KEY protects /create-gift and /send-gift (generate a long random
+// string and send it as the X-API-Key header from your app/backend).
+// ---------------------------------------------------------------------------
+const REQUIRED_ENV = ["ACCOUNT_SID", "AUTH_TOKEN", "JWT_SECRET", "DASHBOARD_PASSWORD", "DATABASE_URL", "GIFT_API_KEY"];
+const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missingEnv.length) {
+  console.error("Missing required environment variables: " + missingEnv.join(", "));
+  process.exit(1);
+}
+ 
+const accountSid    = process.env.ACCOUNT_SID;
+const authToken     = process.env.AUTH_TOKEN;
+const client        = twilio(accountSid, authToken);
+const fromNumber    = "whatsapp:+966534864736";
+const JWT_SECRET    = process.env.JWT_SECRET;
+const DASH_PASS     = process.env.DASHBOARD_PASSWORD;
+const GIFT_API_KEY  = process.env.GIFT_API_KEY;
+const GIFT_BASE_URL = process.env.GIFT_BASE_URL || "https://gift.glamlysa.com";
+const IS_PROD       = process.env.NODE_ENV === "production";
+ 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
-app.use(cors());
+// Required behind a reverse proxy (Railway/Heroku/etc.) so Twilio signature
+// validation and req.ip see the real request URL and client IP.
+app.set("trust proxy", 1);
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 app.use(cookieParser());
-
-const accountSid  = process.env.ACCOUNT_SID;
-const authToken   = process.env.AUTH_TOKEN;
-const client      = twilio(accountSid, authToken);
-const fromNumber  = "whatsapp:+966534864736";
-const JWT_SECRET  = process.env.JWT_SECRET  || "glamly_secret_2026";
-const DASH_PASS   = process.env.DASHBOARD_PASSWORD || "glamly123";
-
+ 
+// CORS: the dashboard is served from this same server, so cross-origin access
+// stays disabled unless you explicitly list origins in CORS_ORIGINS
+// (comma-separated). Non-browser clients (your mobile app) are unaffected.
+const corsOrigins = (process.env.CORS_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
+app.use(cors({ origin: corsOrigins.length ? corsOrigins : false }));
+ 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+ 
+// Constant-time string comparison (hash first so lengths always match).
+function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a)).digest();
+  const hb = crypto.createHash("sha256").update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+ 
+// Accepts digits with optional +, spaces, dashes; returns bare digits or null.
+function cleanPhone(raw) {
+  const p = String(raw || "").replace(/[\s\-+]/g, "");
+  return /^\d{8,15}$/.test(p) ? p : null;
+}
+ 
+// Cryptographically random 8-char code (Math.random is guessable and could
+// produce short codes).
+function makeGiftCode() {
+  return crypto.randomBytes(4).toString("hex").toUpperCase();
+}
+ 
 let db;
 async function connectDB() {
   try {
@@ -43,7 +99,8 @@ async function connectDB() {
         phone VARCHAR(50) NOT NULL,
         sender VARCHAR(20) NOT NULL,
         message TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_messages_phone (phone)
       )
     `);
     await db.execute(`
@@ -65,7 +122,10 @@ async function connectDB() {
   }
 }
 connectDB();
-
+ 
+// ---------------------------------------------------------------------------
+// Auth middleware
+// ---------------------------------------------------------------------------
 function requireAuth(req, res, next) {
   const token = req.cookies.token || req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Unauthorized" });
@@ -76,7 +136,34 @@ function requireAuth(req, res, next) {
     res.status(401).json({ error: "Invalid token" });
   }
 }
-
+ 
+// API-key auth for server-to-server endpoints (gift sending). Your app's
+// backend must send: X-API-Key: <GIFT_API_KEY>
+function requireApiKey(req, res, next) {
+  const key = req.headers["x-api-key"];
+  if (!key || !safeEqual(key, GIFT_API_KEY)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+ 
+// Simple in-memory rate limit for /login: 10 attempts per IP per 15 minutes.
+const loginAttempts = new Map();
+function loginLimiter(req, res, next) {
+  const now = Date.now();
+  const rec = loginAttempts.get(req.ip);
+  if (rec && now < rec.resetAt && rec.count >= 10) {
+    return res.status(429).json({ error: "Too many attempts, try again later" });
+  }
+  if (!rec || now >= rec.resetAt) {
+    loginAttempts.set(req.ip, { count: 0, resetAt: now + 15 * 60 * 1000 });
+  }
+  next();
+}
+ 
+// ---------------------------------------------------------------------------
+// Bot
+// ---------------------------------------------------------------------------
 function getBotReply(message) {
   const msg = message.toLowerCase().trim();
   if (msg === "1" || msg.includes("booking") || msg.includes("status") || msg.includes("حجز") || msg.includes("حالة"))
@@ -93,106 +180,160 @@ function getBotReply(message) {
     return "You're most welcome!\nعلى الرحب والسعة!\n\nGlamly";
   return null;
 }
-
-app.post("/webhook", async (req, res) => {
-  const from    = req.body.From;
-  const message = req.body.Body;
+ 
+// ---------------------------------------------------------------------------
+// Twilio webhook — signature validated so only Twilio can call it.
+// (To test locally with curl, temporarily set validate: false.)
+// ---------------------------------------------------------------------------
+app.post("/webhook", twilio.webhook({ authToken: authToken, validate: true }), async (req, res) => {
+  const from = req.body.From || "";
+  let message = (req.body.Body || "").trim();
+  // Media-only messages (images, voice notes) have no Body — store a
+  // placeholder instead of crashing the INSERT with undefined.
+  if (!message && Number(req.body.NumMedia) > 0) message = "[media message]";
+ 
   try {
-    await db.execute(
-      "INSERT INTO conversations (phone, status, last_seen) VALUES (?, 'bot', NOW()) ON DUPLICATE KEY UPDATE last_seen = NOW()",
-      [from]
-    );
-    await db.execute(
-      "INSERT INTO messages (phone, sender, message) VALUES (?, 'customer', ?)",
-      [from, message]
-    );
-    const botReply = getBotReply(message);
-    if (botReply) {
+    if (from && message) {
       await db.execute(
-        "INSERT INTO messages (phone, sender, message) VALUES (?, 'bot', ?)",
-        [from, botReply]
-      );
-      await db.execute(
-        "UPDATE conversations SET status = 'bot' WHERE phone = ?",
+        "INSERT INTO conversations (phone, status, last_seen) VALUES (?, 'bot', NOW()) ON DUPLICATE KEY UPDATE last_seen = NOW()",
         [from]
       );
-      client.messages.create({ from: fromNumber, to: from, body: botReply });
-    } else {
       await db.execute(
-        "UPDATE conversations SET status = 'pending' WHERE phone = ?",
-        [from]
+        "INSERT INTO messages (phone, sender, message) VALUES (?, 'customer', ?)",
+        [from, message]
       );
+      const botReply = getBotReply(message);
+      if (botReply) {
+        await db.execute(
+          "INSERT INTO messages (phone, sender, message) VALUES (?, 'bot', ?)",
+          [from, botReply]
+        );
+        await db.execute(
+          "UPDATE conversations SET status = 'bot' WHERE phone = ?",
+          [from]
+        );
+        // Awaited so send failures are logged instead of becoming
+        // unhandled promise rejections.
+        try {
+          await client.messages.create({ from: fromNumber, to: from, body: botReply });
+        } catch (sendErr) {
+          console.error("Bot reply send failed:", sendErr.message);
+        }
+      } else {
+        await db.execute(
+          "UPDATE conversations SET status = 'pending' WHERE phone = ?",
+          [from]
+        );
+      }
     }
   } catch (err) {
     console.error("Webhook error:", err.message);
   }
-  res.status(200).send("OK");
+  // Twilio expects TwiML; an empty <Response> means "no additional reply".
+  res.type("text/xml").send("<Response></Response>");
 });
-
-app.post("/login", (req, res) => {
+ 
+// ---------------------------------------------------------------------------
+// Dashboard auth
+// ---------------------------------------------------------------------------
+app.post("/login", loginLimiter, (req, res) => {
   const { password } = req.body;
-  if (password !== DASH_PASS) return res.status(401).json({ error: "Wrong password" });
+  if (!password || !safeEqual(password, DASH_PASS)) {
+    const rec = loginAttempts.get(req.ip);
+    if (rec) rec.count++;
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  loginAttempts.delete(req.ip);
   const token = jwt.sign({ role: "agent" }, JWT_SECRET, { expiresIn: "24h" });
-  res.cookie("token", token, { httpOnly: true, maxAge: 86400000 });
+  res.cookie("token", token, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: "lax",
+    maxAge: 86400000
+  });
   res.json({ success: true, token });
 });
-
+ 
 app.post("/logout", (req, res) => {
   res.clearCookie("token");
   res.json({ success: true });
 });
-
+ 
+// ---------------------------------------------------------------------------
+// Conversations — two fixed queries instead of one query per conversation.
+// ---------------------------------------------------------------------------
 app.get("/conversations", requireAuth, async (req, res) => {
   try {
     const [convs] = await db.execute("SELECT * FROM conversations ORDER BY last_seen DESC");
+    const [msgs]  = await db.execute("SELECT phone, sender, message, created_at FROM messages ORDER BY created_at ASC, id ASC");
+    const byPhone = {};
+    for (const m of msgs) {
+      (byPhone[m.phone] = byPhone[m.phone] || []).push({
+        from: m.sender, message: m.message, time: m.created_at
+      });
+    }
     const result = {};
     for (const conv of convs) {
-      const [msgs] = await db.execute(
-        "SELECT * FROM messages WHERE phone = ? ORDER BY created_at ASC",
-        [conv.phone]
-      );
       result[conv.phone] = {
         status:     conv.status,
         assignedTo: conv.assigned_to,
         lastSeen:   conv.last_seen,
-        messages:   msgs.map(m => ({ from: m.sender, message: m.message, time: m.created_at }))
+        messages:   byPhone[conv.phone] || []
       };
     }
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Conversations error:", err.message);
+    res.status(500).json({ error: "Failed to load conversations" });
   }
 });
-
+ 
 app.post("/reply", requireAuth, async (req, res) => {
   const { to, message } = req.body;
-  const fullNumber = "whatsapp:+" + to;
+  const phone = cleanPhone(to);
+  if (!phone || !message || !String(message).trim()) {
+    return res.status(400).json({ error: "Invalid phone number or empty message" });
+  }
+  const fullNumber = "whatsapp:+" + phone;
   try {
-    await client.messages.create({ from: fromNumber, to: fullNumber, body: message });
+    await client.messages.create({ from: fromNumber, to: fullNumber, body: String(message).trim() });
     await db.execute(
       "INSERT INTO messages (phone, sender, message) VALUES (?, 'agent', ?)",
-      [fullNumber, message]
+      [fullNumber, String(message).trim()]
     );
+    // Replying keeps the conversation active ('agent'); agents mark it
+    // resolved explicitly via the dashboard button.
     await db.execute(
-      "UPDATE conversations SET status = 'resolved', last_seen = NOW() WHERE phone = ?",
+      "UPDATE conversations SET status = 'agent', last_seen = NOW() WHERE phone = ?",
       [fullNumber]
     );
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Reply error:", err.message);
+    // 63016: outside WhatsApp's 24-hour session window — freeform messages
+    // are rejected; a pre-approved template must be used instead.
+    if (err.code === 63016) {
+      return res.status(400).json({ error: "Cannot send: more than 24h since the customer's last message. Use an approved template instead." });
+    }
+    res.status(500).json({ error: "Failed to send message" });
   }
 });
-
+ 
+const VALID_STATUSES = ["bot", "pending", "agent", "resolved"];
 app.post("/status", requireAuth, async (req, res) => {
   const { number, status } = req.body;
+  if (!VALID_STATUSES.includes(status)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
   try {
     await db.execute("UPDATE conversations SET status = ? WHERE phone = ?", [status, number]);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Status error:", err.message);
+    res.status(500).json({ error: "Failed to update status" });
   }
 });
-
+ 
 app.get("/booking/:id", requireAuth, async (req, res) => {
   res.json({
     id:       req.params.id,
@@ -202,53 +343,88 @@ app.get("/booking/:id", requireAuth, async (req, res) => {
     status:   "pending"
   });
 });
-
-app.post("/send-gift", async (req, res) => {
-  const { recipientPhone, senderName, serviceName, salonName, language } = req.body;
-  const templateSid = language === "ar" ? process.env.TEMPLATE_SID_AR : process.env.TEMPLATE_SID_EN;
+ 
+// ---------------------------------------------------------------------------
+// Gifts — both endpoints now require the API key so strangers can't send
+// WhatsApp messages on your Twilio account.
+// ---------------------------------------------------------------------------
+function validateGiftInput(body) {
+  const senderName  = String(body.senderName || "").trim();
+  const serviceName = String(body.serviceName || "").trim();
+  const salonName   = String(body.salonName || "").trim();
+  const phone       = cleanPhone(body.recipientPhone);
+  if (!phone) return { error: "Invalid recipient phone number" };
+  if (!senderName || senderName.length > 100)   return { error: "Invalid sender name" };
+  if (!serviceName || serviceName.length > 200) return { error: "Invalid service name" };
+  if (!salonName || salonName.length > 200)     return { error: "Invalid salon name" };
+  return { senderName, serviceName, salonName, phone };
+}
+ 
+app.post("/send-gift", requireApiKey, async (req, res) => {
+  const input = validateGiftInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const templateSid = req.body.language === "ar" ? process.env.TEMPLATE_SID_AR : process.env.TEMPLATE_SID_EN;
+  if (!templateSid) return res.status(500).json({ error: "Template SID not configured" });
   try {
     await client.messages.create({
       from:             fromNumber,
-      to:               "whatsapp:+" + recipientPhone,
+      to:               "whatsapp:+" + input.phone,
       contentSid:       templateSid,
-      contentVariables: JSON.stringify({ "1": senderName, "2": serviceName, "3": salonName })
+      contentVariables: JSON.stringify({ "1": input.senderName, "2": input.serviceName, "3": input.salonName })
     });
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Send-gift error:", err.message);
+    res.status(500).json({ error: "Failed to send gift message" });
   }
 });
-
-app.post("/create-gift", async (req, res) => {
-  const { senderName, recipientPhone, serviceName, salonName, language } = req.body;
-  const giftCode = Math.random().toString(36).substring(2, 10).toUpperCase();
-  const giftLink = "https://gift.glamlysa.com/gift";
-  const templateSid = language === "ar" ? process.env.TEMPLATE_SID_AR : process.env.TEMPLATE_SID_EN;
+ 
+app.post("/create-gift", requireApiKey, async (req, res) => {
+  const input = validateGiftInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const templateSid = req.body.language === "ar" ? process.env.TEMPLATE_SID_AR : process.env.TEMPLATE_SID_EN;
+  if (!templateSid) return res.status(500).json({ error: "Template SID not configured" });
   try {
-    await db.execute(
-      "INSERT INTO gifts (gift_code, sender_name, recipient_phone, service_name, salon_name) VALUES (?, ?, ?, ?, ?)",
-      [giftCode, senderName, recipientPhone, serviceName, salonName]
-    );
+    // Retry on the (rare) duplicate-code collision.
+    let giftCode = null;
+    for (let attempt = 0; attempt < 5 && !giftCode; attempt++) {
+      const candidate = makeGiftCode();
+      try {
+        await db.execute(
+          "INSERT INTO gifts (gift_code, sender_name, recipient_phone, service_name, salon_name) VALUES (?, ?, ?, ?, ?)",
+          [candidate, input.senderName, input.phone, input.serviceName, input.salonName]
+        );
+        giftCode = candidate;
+      } catch (insertErr) {
+        if (insertErr.code !== "ER_DUP_ENTRY") throw insertErr;
+      }
+    }
+    if (!giftCode) throw new Error("Could not generate a unique gift code");
+ 
+    // The link now actually points at this gift's page.
+    const giftLink = GIFT_BASE_URL + "/gift/" + giftCode;
+ 
     await client.messages.create({
       from:             fromNumber,
-      to:               "whatsapp:+" + recipientPhone,
+      to:               "whatsapp:+" + input.phone,
       contentSid:       templateSid,
       contentVariables: JSON.stringify({
-        "1": senderName,
-        "2": serviceName,
-        "3": salonName
+        "1": input.senderName,
+        "2": input.serviceName,
+        "3": input.salonName
       })
     });
     res.json({ success: true, giftCode: giftCode, giftLink: giftLink });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Create-gift error:", err.message);
+    res.status(500).json({ error: "Failed to create gift" });
   }
 });
-
+ 
+// Generic landing page (no code) — deep-links into the app or shows store links.
 app.get("/gift", (req, res) => {
-  const appleUrl  = process.env.APPLE_STORE_URL  || "https://apps.apple.com";
+  const appleUrl  = process.env.APPLE_STORE_URL || "https://apps.apple.com";
   const googleUrl = process.env.GOOGLE_PLAY_URL || "https://play.google.com";
-
   const lines = [];
   lines.push("<!DOCTYPE html>");
   lines.push("<html lang=\"ar\" dir=\"rtl\">");
@@ -285,8 +461,8 @@ app.get("/gift", (req, res) => {
   lines.push("  <div id=\"fallback\" class=\"hidden\">");
   lines.push("    <h1>هديتك بانتظارك في التطبيق</h1>");
   lines.push("    <p>يبدو ان التطبيق غير مثبت لديك. حملي Glamly الان لعرض هديتك:</p>");
-  lines.push("    <a href=\"" + appleUrl + "\" class=\"btn btn-apple\">App Store</a>");
-  lines.push("    <a href=\"" + googleUrl + "\" class=\"btn btn-android\">Google Play</a>");
+  lines.push("    <a href=\"" + escapeHtml(appleUrl) + "\" class=\"btn btn-apple\">App Store</a>");
+  lines.push("    <a href=\"" + escapeHtml(googleUrl) + "\" class=\"btn btn-android\">Google Play</a>");
   lines.push("  </div>");
   lines.push("  <div class=\"footer\">Glamly</div>");
   lines.push("</div>");
@@ -304,12 +480,14 @@ app.get("/gift", (req, res) => {
   lines.push("</script>");
   lines.push("</body>");
   lines.push("</html>");
-
   res.send(lines.join("\n"));
 });
-
+ 
 app.get("/gift/:code", async (req, res) => {
-  const { code } = req.params;
+  const code = String(req.params.code || "");
+  if (!/^[A-Za-z0-9]{4,20}$/.test(code)) {
+    return res.status(404).send("Not found");
+  }
   try {
     const [rows] = await db.execute(
       "SELECT * FROM gifts WHERE gift_code = ?",
@@ -323,9 +501,14 @@ app.get("/gift/:code", async (req, res) => {
       ].join("\n"));
     }
     const gift = rows[0];
-    const appleUrl  = process.env.APPLE_STORE_URL  || "https://apps.apple.com";
+    const appleUrl  = process.env.APPLE_STORE_URL || "https://apps.apple.com";
     const googleUrl = process.env.GOOGLE_PLAY_URL || "https://play.google.com";
-
+    // All user-supplied values are escaped — sender/service/salon names come
+    // from API input and would otherwise be stored XSS on a public page.
+    const senderName  = escapeHtml(gift.sender_name);
+    const serviceName = escapeHtml(gift.service_name);
+    const salonName   = escapeHtml(gift.salon_name);
+    const giftCodeSafe = escapeHtml(gift.gift_code);
     const html = [
       "<!DOCTYPE html>",
       "<html lang=\"ar\" dir=\"rtl\">",
@@ -364,32 +547,34 @@ app.get("/gift/:code", async (req, res) => {
       "<div class=\"card\">",
       "  <div class=\"brand\">GLAMLY</div>",
       "  <div class=\"tagline\">جمالك بكل سهولة</div>",
-      "  <div class=\"from\">أهدتك <span>" + gift.sender_name + "</span> هدية مميزة</div>",
+      "  <div class=\"from\">أهدتك <span>" + senderName + "</span> هدية مميزة</div>",
       "  <h1>تجربة تجميل بانتظارك</h1>",
       "  <span class=\"status " + (gift.status === "used" ? "used" : "pending") + "\">" + (gift.status === "used" ? "تم الاستخدام" : "لم تستخدم بعد") + "</span>",
       "  <div class=\"divider\"></div>",
       "  <div class=\"detail-box\">",
-      "    <div class=\"detail-row\"><span class=\"detail-value\">" + gift.service_name + "</span><span class=\"detail-label\">الخدمة</span></div>",
-      "    <div class=\"detail-row\"><span class=\"detail-value\">" + gift.salon_name + "</span><span class=\"detail-label\">المكان</span></div>",
+      "    <div class=\"detail-row\"><span class=\"detail-value\">" + serviceName + "</span><span class=\"detail-label\">الخدمة</span></div>",
+      "    <div class=\"detail-row\"><span class=\"detail-value\">" + salonName + "</span><span class=\"detail-label\">المكان</span></div>",
       "    <div class=\"detail-row\"><span class=\"detail-value\">" + new Date(gift.created_at).toLocaleDateString("ar-SA") + "</span><span class=\"detail-label\">تاريخ الهدية</span></div>",
       "  </div>",
-      "  <a href=\"glamly://gift/" + gift.gift_code + "\" class=\"btn btn-main\">احجزي موعدك الآن</a>",
+      "  <a href=\"glamly://gift/" + giftCodeSafe + "\" class=\"btn btn-main\">احجزي موعدك الآن</a>",
       "  <div class=\"divider-text\">اذا لم يكن التطبيق مثبتا لديك، حملي من هنا:</div>",
-      "  <a href=\"" + appleUrl + "\" class=\"btn btn-apple\">App Store</a>",
-      "  <a href=\"" + googleUrl + "\" class=\"btn btn-android\">Google Play</a>",
+      "  <a href=\"" + escapeHtml(appleUrl) + "\" class=\"btn btn-apple\">App Store</a>",
+      "  <a href=\"" + escapeHtml(googleUrl) + "\" class=\"btn btn-android\">Google Play</a>",
       "  <div class=\"footer\">Glamly</div>",
       "</div>",
       "</body>",
       "</html>"
     ].join("\n");
-
     res.send(html);
   } catch (err) {
     console.error("Gift page error:", err.message);
     res.status(500).send("Error loading gift");
   }
 });
-
+ 
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
 app.get("/dashboard", (req, res) => {
   const html = [
     "<!DOCTYPE html>",
@@ -437,6 +622,7 @@ app.get("/dashboard", (req, res) => {
     ".badge{display:inline-block;padding:1px 8px;border-radius:8px;font-size:10px;font-weight:500;margin-top:4px}",
     ".badge.pending{background:#C8A84B22;color:#C8A84B;border:0.5px solid #C8A84B}",
     ".badge.bot{background:#1D9E7522;color:#1D9E75;border:0.5px solid #1D9E75}",
+    ".badge.agent{background:#7F77DD22;color:#B89FFF;border:0.5px solid #7F77DD}",
     ".badge.resolved{background:#534AB722;color:#9F7FEA;border:0.5px solid #534AB7}",
     ".chat-area{flex:1;display:flex;flex-direction:column;background:#f0eef8}",
     ".chat-head{padding:12px 18px;background:white;border-bottom:1px solid #eee;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}",
@@ -502,6 +688,7 @@ app.get("/dashboard", (req, res) => {
     "      <div class=\"filter-row\">",
     "        <button class=\"f-btn active\" onclick=\"setFilter('all',this)\">All</button>",
     "        <button class=\"f-btn\" onclick=\"setFilter('pending',this)\">Pending</button>",
+    "        <button class=\"f-btn\" onclick=\"setFilter('agent',this)\">Agent</button>",
     "        <button class=\"f-btn\" onclick=\"setFilter('bot',this)\">Bot</button>",
     "        <button class=\"f-btn\" onclick=\"setFilter('resolved',this)\">Resolved</button>",
     "      </div>",
@@ -520,6 +707,14 @@ app.get("/dashboard", (req, res) => {
     "var currentLang='en';",
     "var authToken=localStorage.getItem('glamly_token')||'';",
     "",
+    "// Escape everything that goes into innerHTML — customer messages are",
+    "// attacker-controlled and were previously stored XSS in this dashboard.",
+    "function esc(s){",
+    "  var d=document.createElement('div');",
+    "  d.textContent=(s==null?'':String(s));",
+    "  return d.innerHTML;",
+    "}",
+    "",
     "var quickReplies={",
     "  en:['Please share your booking ID so I can help you.','Cancellations made 24hrs before appointment are fully refunded.','Your refund will be processed within 3-5 business days.','Thank you for choosing Glamly!'],",
     "  ar:['من فضلك أرسل رقم حجزك حتى أتمكن من مساعدتك.','الإلغاء قبل 24 ساعة من الموعد يحصل على استرداد كامل.','سيتم معالجة استرداد المبلغ خلال 3-5 أيام عمل.','شكراً لاختيارك Glamly!']",
@@ -535,7 +730,7 @@ app.get("/dashboard", (req, res) => {
     "        localStorage.setItem('glamly_token',authToken);",
     "        showApp();",
     "      } else {",
-    "        document.getElementById('loginErr').textContent='Wrong password';",
+    "        document.getElementById('loginErr').textContent=data.error||'Wrong password';",
     "      }",
     "    });",
     "}",
@@ -576,11 +771,14 @@ app.get("/dashboard", (req, res) => {
     "",
     "function timeAgo(iso){",
     "  var d=Math.floor((Date.now()-new Date(iso))/1000);",
+    "  if(d<0) d=0;",
     "  if(d<60) return d+'s';",
     "  if(d<3600) return Math.floor(d/60)+'m';",
     "  if(d<86400) return Math.floor(d/3600)+'h';",
     "  return Math.floor(d/86400)+'d';",
     "}",
+    "",
+    "var KNOWN_STATUSES=['pending','bot','agent','resolved'];",
     "",
     "function renderList(){",
     "  var list=document.getElementById('convList');",
@@ -599,8 +797,9 @@ app.get("/dashboard", (req, res) => {
     "    if(search && number.indexOf(search)===-1 && preview.toLowerCase().indexOf(search)===-1) continue;",
     "    var div=document.createElement('div');",
     "    div.className='conv-item'+(number===activeNumber?' active':'');",
-    "    var badgeText=data.status==='pending'?'Pending':data.status==='bot'?'Bot':'Resolved';",
-    "    div.innerHTML='<div class=\"conv-top\"><span class=\"conv-num\">'+number.replace('whatsapp:+','')+'</span><span class=\"conv-time\">'+timeAgo(data.lastSeen)+'</span></div><div class=\"conv-prev\">'+preview+'</div><span class=\"badge '+data.status+'\">'+badgeText+'</span>';",
+    "    var statusClass=KNOWN_STATUSES.indexOf(data.status)!==-1?data.status:'bot';",
+    "    var badgeText=data.status==='pending'?'Pending':data.status==='bot'?'Bot':data.status==='agent'?'Agent':'Resolved';",
+    "    div.innerHTML='<div class=\"conv-top\"><span class=\"conv-num\">'+esc(number.replace('whatsapp:+',''))+'</span><span class=\"conv-time\">'+esc(timeAgo(data.lastSeen))+'</span></div><div class=\"conv-prev\">'+esc(preview)+'</div><span class=\"badge '+statusClass+'\">'+esc(badgeText)+'</span>';",
     "    div.onclick=(function(num){ return function(){ openConversation(num); }; })(number);",
     "    list.appendChild(div);",
     "  }",
@@ -613,7 +812,6 @@ app.get("/dashboard", (req, res) => {
     "function openConversation(number){",
     "  activeNumber=number;",
     "  var data=conversations[number];",
-    "  var isAr=currentLang==='ar';",
     "  var num=number.replace('whatsapp:+','');",
     "",
     "  var msgsHtml='';",
@@ -621,18 +819,19 @@ app.get("/dashboard", (req, res) => {
     "    var m=data.messages[i];",
     "    var side=m.from==='customer'?'left':'right';",
     "    var who=m.from==='customer'?'Customer':m.from==='bot'?'Bot':'Agent';",
-    "    msgsHtml += '<div class=\"msg-wrap '+side+'\"><div class=\"msg '+m.from+'\">'+m.message+'</div><div class=\"msg-meta\">'+who+' - '+new Date(m.time).toLocaleTimeString()+'</div></div>';",
+    "    var msgClass=m.from==='customer'?'customer':m.from==='bot'?'bot':'agent';",
+    "    msgsHtml += '<div class=\"msg-wrap '+side+'\"><div class=\"msg '+msgClass+'\">'+esc(m.message)+'</div><div class=\"msg-meta\">'+who+' - '+esc(new Date(m.time).toLocaleTimeString())+'</div></div>';",
     "  }",
     "",
     "  var qrHtml='';",
     "  var qrList=quickReplies[currentLang];",
     "  for(var j=0;j<qrList.length;j++){",
-    "    qrHtml += '<button class=\"qr\" onclick=\"setReply(this.textContent)\">'+qrList[j]+'</button>';",
+    "    qrHtml += '<button class=\"qr\" onclick=\"setReply(this.textContent)\">'+esc(qrList[j])+'</button>';",
     "  }",
     "",
     "  document.getElementById('chatArea').innerHTML =",
-    "    '<div class=\"chat-head\"><div class=\"ch-left\"><div class=\"avatar\">'+num.slice(-2)+'</div><div><div class=\"ch-name\">+'+num+'</div><div class=\"ch-sub\">Status: '+data.status+'</div></div></div>'+",
-    "    '<div class=\"ch-actions\"><button class=\"act-btn\" onclick=\"lookupBooking()\">Booking lookup</button><button class=\"act-btn success\" onclick=\"markResolved(\\''+number+'\\')\">Mark resolved</button></div></div>'+",
+    "    '<div class=\"chat-head\"><div class=\"ch-left\"><div class=\"avatar\">'+esc(num.slice(-2))+'</div><div><div class=\"ch-name\">+'+esc(num)+'</div><div class=\"ch-sub\">Status: '+esc(data.status)+'</div></div></div>'+",
+    "    '<div class=\"ch-actions\"><button class=\"act-btn\" onclick=\"lookupBooking()\">Booking lookup</button><button class=\"act-btn success\" onclick=\"markResolved(\\''+esc(number)+'\\')\">Mark resolved</button></div></div>'+",
     "    '<div class=\"messages\" id=\"messages\">'+msgsHtml+'</div>'+",
     "    '<div class=\"quick-replies\"><div class=\"qr-label\">Quick replies:</div>'+qrHtml+'</div>'+",
     "    '<div class=\"reply-box\"><textarea id=\"replyInput\" placeholder=\"Type your reply...\" onkeydown=\"if(event.key===\\'Enter\\' && !event.shiftKey){event.preventDefault();sendReply();}\"></textarea><button class=\"send-btn\" onclick=\"sendReply()\">Send</button></div>';",
@@ -652,8 +851,16 @@ app.get("/dashboard", (req, res) => {
     "  if(!message || !activeNumber) return;",
     "  input.value='';",
     "  fetch('/reply',{method:'POST',headers:authHeaders(),body:JSON.stringify({to:activeNumber.replace('whatsapp:+',''),message:message})})",
-    "    .then(function(){ return loadConversations(); })",
-    "    .then(function(){ openConversation(activeNumber); });",
+    "    .then(function(res){ return res.json(); })",
+    "    .then(function(data){",
+    "      if(data && data.error){",
+    "        alert(data.error);",
+    "        input.value=message; // restore so the agent doesn't lose the draft",
+    "        return;",
+    "      }",
+    "      return loadConversations().then(function(){ openConversation(activeNumber); });",
+    "    })",
+    "    .catch(function(){ alert('Failed to send message'); input.value=message; });",
     "}",
     "",
     "function markResolved(number){",
@@ -665,14 +872,14 @@ app.get("/dashboard", (req, res) => {
     "function lookupBooking(){",
     "  var bookingId=prompt('Enter booking ID:');",
     "  if(!bookingId) return;",
-    "  fetch('/booking/'+bookingId,{headers:authHeaders()})",
+    "  fetch('/booking/'+encodeURIComponent(bookingId),{headers:authHeaders()})",
     "    .then(function(res){ return res.json(); })",
     "    .then(function(data){",
     "      var msgs=document.getElementById('messages');",
     "      if(!msgs) return;",
     "      var card=document.createElement('div');",
     "      card.className='msg-wrap left';",
-    "      card.innerHTML='<div class=\"booking-card\"><h4>Booking #'+data.id+'</h4><table><tr><td>Customer</td><td>'+data.customer+'</td></tr><tr><td>Service</td><td>'+data.service+'</td></tr><tr><td>Date</td><td>'+data.date+'</td></tr><tr><td>Status</td><td>'+data.status+'</td></tr></table></div>';",
+    "      card.innerHTML='<div class=\"booking-card\"><h4>Booking #'+esc(data.id)+'</h4><table><tr><td>Customer</td><td>'+esc(data.customer)+'</td></tr><tr><td>Service</td><td>'+esc(data.service)+'</td></tr><tr><td>Date</td><td>'+esc(data.date)+'</td></tr><tr><td>Status</td><td>'+esc(data.status)+'</td></tr></table></div>';",
     "      msgs.appendChild(card);",
     "      msgs.scrollTop=99999;",
     "    });",
@@ -700,8 +907,10 @@ app.get("/dashboard", (req, res) => {
     "</body>",
     "</html>"
   ].join("\n");
-
   res.send(html);
 });
+ 
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
+ 
 
-app.listen(process.env.PORT || 3000, () => console.log("Glamly webhook running on port 3000"));
