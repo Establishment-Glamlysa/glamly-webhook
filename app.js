@@ -171,9 +171,6 @@ function loginLimiter(req, res, next) {
 }
  
 // ---------------------------------------------------------------------------
-// Bot
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Bot FAQ — bilingual. The bot detects the customer's language per message
 // and replies in that language only ('ar' is the default).
 // Edit the answer texts below to match your real policies
@@ -275,10 +272,9 @@ function getBotReply(message, lang) {
  
 // ---------------------------------------------------------------------------
 // Twilio webhook — signature validated so only Twilio can call it.
-// (To test locally with curl, temporarily set validate: false.)
-// ---------------------------------------------------------------------------
 // Set env var TWILIO_VALIDATE=false to temporarily skip signature validation
 // while debugging (turn it back on afterwards!).
+// ---------------------------------------------------------------------------
 const validateTwilio = process.env.TWILIO_VALIDATE !== "false";
 app.post("/webhook", (req, res, next) => {
   console.log("Webhook hit | From:", req.body.From || "(none)", "| signature:", req.headers["x-twilio-signature"] ? "present" : "MISSING", "| url seen as:", req.protocol + "://" + req.get("host") + req.originalUrl);
@@ -302,6 +298,7 @@ app.post("/webhook", (req, res, next) => {
         "INSERT INTO messages (phone, sender, message, media_url, media_type) VALUES (?, 'customer', ?, ?, ?)",
         [from, message, mediaUrl, mediaType]
       );
+ 
       const [existing] = await db.execute(
         "SELECT status, lang FROM conversations WHERE phone = ?",
         [from]
@@ -483,7 +480,7 @@ app.post("/reply", requireAuth, async (req, res) => {
     // 63016: outside WhatsApp's 24-hour session window — freeform messages
     // are rejected; a pre-approved template must be used instead.
     if (err.code === 63016) {
-      return res.status(400).json({ error: "Cannot send: more than 24h since the customer's last message. Use an approved template instead." });
+      return res.status(400).json({ error: "Cannot send: more than 24h since the customer's last message. Use the Template button instead." });
     }
     res.status(500).json({ error: "Failed to send message" });
   }
@@ -566,7 +563,7 @@ app.get("/booking/:id", requireAuth, async (req, res) => {
 });
  
 // ---------------------------------------------------------------------------
-// Gifts — both endpoints now require the API key so strangers can't send
+// Gifts — both endpoints require the API key so strangers can't send
 // WhatsApp messages on your Twilio account.
 // ---------------------------------------------------------------------------
 function validateGiftInput(body) {
@@ -622,7 +619,7 @@ app.post("/create-gift", requireApiKey, async (req, res) => {
     }
     if (!giftCode) throw new Error("Could not generate a unique gift code");
  
-    // The link now actually points at this gift's page.
+    // The link points at this gift's personal page.
     const giftLink = GIFT_BASE_URL + "/gift/" + giftCode;
  
     await client.messages.create({
@@ -932,7 +929,7 @@ app.get("/dashboard", (req, res) => {
     "var eventSource=null;",
     "",
     "// Escape everything that goes into innerHTML — customer messages are",
-    "// attacker-controlled and were previously stored XSS in this dashboard.",
+    "// attacker-controlled and would otherwise be stored XSS in this dashboard.",
     "function esc(s){",
     "  var d=document.createElement('div');",
     "  d.textContent=(s==null?'':String(s));",
@@ -1203,7 +1200,7 @@ app.get("/dashboard", (req, res) => {
  
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
-// v2.1 — draft preservation fix
+// v3.0 — bilingual bot, SSE dashboard, media, notifications, template button
  
 
 Unable to open file.
