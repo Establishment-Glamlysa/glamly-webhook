@@ -86,6 +86,7 @@ async function connectDB() {
         id INT AUTO_INCREMENT PRIMARY KEY,
         phone VARCHAR(50) UNIQUE NOT NULL,
         status VARCHAR(20) DEFAULT 'bot',
+        lang VARCHAR(5) DEFAULT 'ar',
         assigned_to VARCHAR(100),
         last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -97,6 +98,8 @@ async function connectDB() {
         phone VARCHAR(50) NOT NULL,
         sender VARCHAR(20) NOT NULL,
         message TEXT NOT NULL,
+        media_url VARCHAR(512),
+        media_type VARCHAR(100),
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_messages_phone (phone)
       )
@@ -113,6 +116,14 @@ async function connectDB() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Lightweight migrations for databases created before these columns existed.
+    const ensureColumn = async (table, ddl) => {
+      try { await db.execute("ALTER TABLE " + table + " ADD COLUMN " + ddl); }
+      catch (e) { if (e.code !== "ER_DUP_FIELDNAME") throw e; }
+    };
+    await ensureColumn("conversations", "lang VARCHAR(5) DEFAULT 'ar'");
+    await ensureColumn("messages", "media_url VARCHAR(512)");
+    await ensureColumn("messages", "media_type VARCHAR(100)");
     console.log("Database connected!");
   } catch (err) {
     console.error("Database connection failed:", err.message);
@@ -163,91 +174,103 @@ function loginLimiter(req, res, next) {
 // Bot
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// Bot FAQ — edit the answer texts below to match your real policies
+// Bot FAQ — bilingual. The bot detects the customer's language per message
+// and replies in that language only ('ar' is the default).
+// Edit the answer texts below to match your real policies
 // (especially payment methods and refund timelines).
 // getBotReply always returns { reply, handoff }:
 //   reply   -> text sent back to the customer
 //   handoff -> true = also flag the conversation as 'pending' for an agent
 // ---------------------------------------------------------------------------
-const MENU_OPTIONS =
-  "1- Booking status | حالة الحجز\n" +
-  "2- Cancel or reschedule | إلغاء أو تعديل الحجز\n" +
-  "3- Prices & services | الأسعار والخدمات\n" +
-  "4- Payment methods | طرق الدفع\n" +
-  "5- Refunds | استرداد المبلغ\n" +
-  "6- Gift cards | بطاقات الهدايا\n" +
-  "7- Talk to an agent | التحدث مع موظف";
+const FAQ = {
+  menu: {
+    en: "1️⃣ Booking status 📅\n2️⃣ Cancel or reschedule 🔄\n3️⃣ Prices & services 💅\n4️⃣ Payment methods 💳\n5️⃣ Refunds 💸\n6️⃣ Gift cards 🎁\n7️⃣ Talk to an agent 💬",
+    ar: "1️⃣ حالة الحجز 📅\n2️⃣ إلغاء أو تعديل الحجز 🔄\n3️⃣ الأسعار والخدمات 💅\n4️⃣ طرق الدفع 💳\n5️⃣ استرداد المبلغ 💸\n6️⃣ بطاقات الهدايا 🎁\n7️⃣ التحدث مع موظف 💬"
+  },
+  welcome: {
+    en: "✨ Welcome to Glamly! ✨\nHow can we help you today?\n\n",
+    ar: "✨ أهلاً بك في Glamly! ✨\nكيف نقدر نساعدك اليوم؟\n\n"
+  },
+  agent: {
+    en: "💬 Connecting you to an agent now — one moment please! 🙏",
+    ar: "💬 جاري تحويلك لموظف — لحظة من فضلك! 🙏"
+  },
+  status: {
+    en: "📅 Please share your booking ID and an agent will check it for you right away! ⚡",
+    ar: "📅 أرسل رقم حجزك وسيتحقق منه أحد الموظفين فوراً! ⚡"
+  },
+  cancel: {
+    en: "🔄 To cancel or reschedule, please share your booking ID and an agent will assist you.\n\n💡 Cancellations made 24hrs before the appointment are fully refunded.",
+    ar: "🔄 لإلغاء أو تعديل حجزك أرسل رقم الحجز وسيساعدك أحد الموظفين.\n\n💡 الإلغاء قبل 24 ساعة من الموعد يحصل على استرداد كامل."
+  },
+  prices: {
+    en: "💅 Browse all services and prices in the Glamly app!\n\n🔗 glamlysa.com ✨",
+    ar: "💅 تصفح جميع الخدمات والأسعار في تطبيق Glamly!\n\n🔗 glamlysa.com ✨"
+  },
+  payment: { // EDIT: confirm these match what you actually accept
+    en: "💳 You can pay securely in the Glamly app using:\n\n• mada\n• Visa / Mastercard\n• Apple Pay 🍎",
+    ar: "💳 يمكنك الدفع بأمان في تطبيق Glamly عبر:\n\n• مدى\n• فيزا / ماستركارد\n• Apple Pay 🍎"
+  },
+  refund: {
+    en: "💸 Cancellations made 24hrs or more before the appointment are fully refunded.\n\n⏱️ Refunds are processed within 3-5 business days to your original payment method.",
+    ar: "💸 الإلغاء قبل 24 ساعة أو أكثر من الموعد يحصل على استرداد كامل.\n\n⏱️ تتم معالجة الاسترداد خلال 3-5 أيام عمل إلى نفس وسيلة الدفع."
+  },
+  gift: {
+    en: "🎁 You can gift any service from the Glamly app!\n\n💝 Your friend instantly receives their gift on WhatsApp with a link to book their appointment. ✨",
+    ar: "🎁 يمكنك إهداء أي خدمة من تطبيق Glamly!\n\n💝 تصل الهدية فوراً عبر واتساب مع رابط لحجز الموعد. ✨"
+  },
+  thanks: {
+    en: "You're most welcome! 💜\n\nGlamly ✨",
+    ar: "على الرحب والسعة! 💜\n\nGlamly ✨"
+  },
+  fallback: {
+    en: "🤔 Sorry, I didn't quite get that — an agent will follow up with you shortly. 💬\n\nMeanwhile, you can pick an option:\n\n",
+    ar: "🤔 عذراً، لم أفهم رسالتك — سيتواصل معك أحد الموظفين قريباً. 💬\n\nيمكنك أيضاً اختيار أحد الخيارات:\n\n"
+  }
+};
  
-const WELCOME_MENU =
-  "Welcome to Glamly!\nأهلاً بك في Glamly!\n\n" + MENU_OPTIONS;
+// 'ar' if the message contains Arabic script, 'en' if it contains Latin
+// letters, null if neither (e.g. "1") — caller falls back to the stored lang.
+function detectLang(text) {
+  if (/[؀-ۿ]/.test(text)) return "ar";
+  if (/[a-z]/i.test(text)) return "en";
+  return null;
+}
  
-function getBotReply(message) {
+function getBotReply(message, lang) {
+  const t = key => FAQ[key][lang] || FAQ[key].ar;
   const msg = message.toLowerCase().trim();
   const has = (...words) => words.some(w => msg.includes(w));
  
   // 7 - Agent (checked first so "agent" requests always win)
   if (msg === "7" || has("agent", "human", "support", "staff", "موظف", "مساعدة", "خدمة العملاء"))
-    return {
-      reply: "Connecting you to an agent now. Please wait!\n\nجاري تحويلك لموظف. لحظة من فضلك!",
-      handoff: true
-    };
- 
+    return { reply: t("agent"), handoff: true };
   // 1 - Booking status
   if (msg === "1" || has("booking", "status", "appointment", "حجز", "حالة", "موعدي"))
-    return {
-      reply: "Please share your booking ID and an agent will check it for you right away!\n\nأرسل رقم حجزك وسيتحقق منه أحد الموظفين فوراً!",
-      handoff: true
-    };
- 
+    return { reply: t("status"), handoff: true };
   // 2 - Cancel / reschedule
   if (msg === "2" || has("cancel", "reschedule", "إلغاء", "الغ", "تعديل", "تأجيل"))
-    return {
-      reply: "To cancel or reschedule, please share your booking ID and an agent will assist you.\n\nCancellations made 24hrs before the appointment are fully refunded.\n\nلإلغاء أو تعديل حجزك أرسل رقم الحجز وسيساعدك أحد الموظفين.\nالإلغاء قبل 24 ساعة من الموعد يحصل على استرداد كامل.",
-      handoff: true
-    };
- 
-  // 3 - Prices & services
-  // "كم" only as a whole word — it's a substring of common words like "عليكم"
+    return { reply: t("cancel"), handoff: true };
+  // 3 - Prices ("كم" only as a whole word — substring of words like "عليكم")
   if (msg === "3" || has("price", "cost", "how much", "services", "سعر", "أسعار", "تكلفة") || msg.split(/\s+/).some(w => w === "كم" || w === "بكم"))
-    return {
-      reply: "Browse all services and prices in the Glamly app!\n\nglamlysa.com\n\nتصفح جميع الخدمات والأسعار في تطبيق Glamly!\nglamlysa.com",
-      handoff: false
-    };
- 
-  // 4 - Payment methods  (EDIT: confirm these match what you actually accept)
+    return { reply: t("prices"), handoff: false };
+  // 4 - Payment methods
   if (msg === "4" || has("pay", "payment", "mada", "apple pay", "دفع", "مدى", "فيزا", "بطاقة ائتمان"))
-    return {
-      reply: "You can pay securely in the Glamly app using mada, Visa/Mastercard, or Apple Pay.\n\nيمكنك الدفع بأمان في تطبيق Glamly عبر مدى أو فيزا/ماستركارد أو Apple Pay.",
-      handoff: false
-    };
- 
+    return { reply: t("payment"), handoff: false };
   // 5 - Refunds
   if (msg === "5" || has("refund", "money back", "استرداد", "استرجاع"))
-    return {
-      reply: "Cancellations made 24hrs or more before the appointment are fully refunded. Refunds are processed within 3-5 business days to your original payment method.\n\nالإلغاء قبل 24 ساعة أو أكثر من الموعد يحصل على استرداد كامل. تتم معالجة الاسترداد خلال 3-5 أيام عمل إلى نفس وسيلة الدفع.",
-      handoff: false
-    };
- 
+    return { reply: t("refund"), handoff: false };
   // 6 - Gift cards
   if (msg === "6" || has("gift", "هدية", "هدايا", "اهداء", "إهداء"))
-    return {
-      reply: "You can gift any service from the Glamly app! Your friend instantly receives their gift on WhatsApp with a link to book their appointment.\n\nيمكنك إهداء أي خدمة من تطبيق Glamly! تصل الهدية فوراً عبر واتساب مع رابط لحجز الموعد.",
-      handoff: false
-    };
- 
-  // Greetings -> show the menu
+    return { reply: t("gift"), handoff: false };
+  // Greetings -> menu
   if (has("hello", "hi", "hey", "مرحبا", "هلا", "اهلا", "أهلا", "السلام"))
-    return { reply: WELCOME_MENU, handoff: false };
- 
+    return { reply: t("welcome") + t("menu"), handoff: false };
   // Thanks
   if (has("thank", "شكر"))
-    return { reply: "You're most welcome!\nعلى الرحب والسعة!\n\nGlamly", handoff: false };
- 
-  // Fallback: didn't understand -> show the menu AND flag an agent
-  return {
-    reply: "Sorry, I didn't quite get that — an agent will follow up with you shortly. Meanwhile, you can pick an option:\n\nعذراً، لم أفهم رسالتك — سيتواصل معك أحد الموظفين قريباً. يمكنك أيضاً اختيار أحد الخيارات:\n\n" + MENU_OPTIONS,
-    handoff: true
-  };
+    return { reply: t("thanks"), handoff: false };
+  // Fallback: didn't understand -> menu in their language AND flag an agent
+  return { reply: t("fallback") + t("menu"), handoff: true };
 }
  
 // ---------------------------------------------------------------------------
@@ -262,35 +285,46 @@ app.post("/webhook", (req, res, next) => {
   next();
 }, twilio.webhook({ validate: validateTwilio }, authToken), async (req, res) => {
   const from = req.body.From || "";
-  let message = (req.body.Body || "").trim();
-  // Media-only messages (images, voice notes) have no Body — store a
-  // placeholder instead of crashing the INSERT with undefined.
-  if (!message && Number(req.body.NumMedia) > 0) message = "[media message]";
+  const message = (req.body.Body || "").trim();
+  // Media messages (images, voice notes): store the first attachment's URL
+  // so the dashboard can display it via the /media proxy.
+  const numMedia  = Number(req.body.NumMedia) || 0;
+  const mediaUrl  = numMedia > 0 ? (req.body.MediaUrl0 || null) : null;
+  const mediaType = numMedia > 0 ? (req.body.MediaContentType0 || null) : null;
  
   try {
-    if (from && message) {
+    if (from && (message || mediaUrl)) {
       await db.execute(
         "INSERT INTO conversations (phone, status, last_seen) VALUES (?, 'bot', NOW()) ON DUPLICATE KEY UPDATE last_seen = NOW()",
         [from]
       );
       await db.execute(
-        "INSERT INTO messages (phone, sender, message) VALUES (?, 'customer', ?)",
-        [from, message]
+        "INSERT INTO messages (phone, sender, message, media_url, media_type) VALUES (?, 'customer', ?, ?, ?)",
+        [from, message, mediaUrl, mediaType]
       );
-      // If an agent is already handling this chat (or it's waiting for one),
-      // the bot stays quiet — the message is just stored and re-flagged.
       const [existing] = await db.execute(
-        "SELECT status FROM conversations WHERE phone = ?",
+        "SELECT status, lang FROM conversations WHERE phone = ?",
         [from]
       );
       const currentStatus = existing.length ? existing[0].status : "bot";
+ 
+      // Detect and remember the customer's language ('ar' default).
+      const detected = detectLang(message);
+      const lang = detected || (existing.length && existing[0].lang) || "ar";
+      if (detected && existing.length && existing[0].lang !== detected) {
+        await db.execute("UPDATE conversations SET lang = ? WHERE phone = ?", [detected, from]);
+      }
+ 
+      // If an agent is already handling this chat (or it's waiting for one),
+      // the bot stays quiet — the message is just stored and re-flagged.
       if (currentStatus === "agent" || currentStatus === "pending") {
         await db.execute(
           "UPDATE conversations SET status = 'pending' WHERE phone = ?",
           [from]
         );
+        if (currentStatus === "agent") notifyAgents(from, message || "[media]");
       } else {
-        const bot = getBotReply(message);
+        const bot = getBotReply(message, lang);
         await db.execute(
           "INSERT INTO messages (phone, sender, message) VALUES (?, 'bot', ?)",
           [from, bot.reply]
@@ -299,6 +333,7 @@ app.post("/webhook", (req, res, next) => {
           "UPDATE conversations SET status = ? WHERE phone = ?",
           [bot.handoff ? "pending" : "bot", from]
         );
+        if (bot.handoff) notifyAgents(from, message || "[media]");
         // Awaited so send failures are logged instead of becoming
         // unhandled promise rejections.
         try {
@@ -307,6 +342,7 @@ app.post("/webhook", (req, res, next) => {
           console.error("Bot reply send failed:", sendErr.message);
         }
       }
+      broadcast();
     }
   } catch (err) {
     console.error("Webhook error:", err.message);
@@ -342,22 +378,73 @@ app.post("/logout", (req, res) => {
 });
  
 // ---------------------------------------------------------------------------
+// Real-time updates (SSE): the dashboard listens on /events and reloads
+// whenever broadcast() is called after a message or status change.
+// ---------------------------------------------------------------------------
+const sseClients = new Set();
+function broadcast() {
+  for (const clientRes of sseClients) {
+    try { clientRes.write("data: update\n\n"); } catch { sseClients.delete(clientRes); }
+  }
+}
+app.get("/events", requireAuth, (req, res) => {
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  res.flushHeaders();
+  res.write("data: connected\n\n");
+  sseClients.add(res);
+  const ping = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch { /* cleaned up on close */ }
+  }, 25000);
+  req.on("close", () => { clearInterval(ping); sseClients.delete(res); });
+});
+ 
+// Optional WhatsApp alert to agents when a chat needs a human.
+// Set AGENT_ALERT_NUMBERS to comma-separated numbers, e.g. "9665xxxxxxxx,9665yyyyyyyy".
+// Note: WhatsApp only delivers these if the agent messaged the business number
+// within the last 24h — the dashboard sound/notification always works.
+async function notifyAgents(from, preview) {
+  const numbers = (process.env.AGENT_ALERT_NUMBERS || "").split(",").map(s => s.trim()).filter(Boolean);
+  for (const n of numbers) {
+    try {
+      await client.messages.create({
+        from: fromNumber,
+        to: "whatsapp:+" + n.replace(/^\+/, ""),
+        body: "Glamly: new chat waiting for an agent\n" + from.replace("whatsapp:", "") + ": " + String(preview).substring(0, 100)
+      });
+    } catch (e) {
+      console.error("Agent alert failed:", e.message);
+    }
+  }
+}
+ 
+// ---------------------------------------------------------------------------
 // Conversations — two fixed queries instead of one query per conversation.
 // ---------------------------------------------------------------------------
 app.get("/conversations", requireAuth, async (req, res) => {
   try {
     const [convs] = await db.execute("SELECT * FROM conversations ORDER BY last_seen DESC");
-    const [msgs]  = await db.execute("SELECT phone, sender, message, created_at FROM messages ORDER BY created_at ASC, id ASC");
+    const [msgs]  = await db.execute("SELECT id, phone, sender, message, media_url, media_type, created_at FROM messages ORDER BY created_at ASC, id ASC");
     const byPhone = {};
     for (const m of msgs) {
       (byPhone[m.phone] = byPhone[m.phone] || []).push({
-        from: m.sender, message: m.message, time: m.created_at
+        id:        m.id,
+        from:      m.sender,
+        message:   m.message,
+        time:      m.created_at,
+        hasMedia:  !!m.media_url,
+        mediaType: m.media_type
       });
     }
     const result = {};
     for (const conv of convs) {
       result[conv.phone] = {
         status:     conv.status,
+        lang:       conv.lang || "ar",
         assignedTo: conv.assigned_to,
         lastSeen:   conv.last_seen,
         messages:   byPhone[conv.phone] || []
@@ -389,6 +476,7 @@ app.post("/reply", requireAuth, async (req, res) => {
       "UPDATE conversations SET status = 'agent', last_seen = NOW() WHERE phone = ?",
       [fullNumber]
     );
+    broadcast();
     res.json({ success: true });
   } catch (err) {
     console.error("Reply error:", err.message);
@@ -401,6 +489,56 @@ app.post("/reply", requireAuth, async (req, res) => {
   }
 });
  
+// Send a pre-approved template when the 24h WhatsApp window has closed.
+// Create a re-engagement template in Twilio (Content Editor), get it approved
+// for WhatsApp, then set SUPPORT_TEMPLATE_SID_EN / SUPPORT_TEMPLATE_SID_AR.
+app.post("/send-template", requireAuth, async (req, res) => {
+  const { to, language } = req.body;
+  const phone = cleanPhone(to);
+  if (!phone) return res.status(400).json({ error: "Invalid phone number" });
+  const sid = language === "ar" ? process.env.SUPPORT_TEMPLATE_SID_AR : process.env.SUPPORT_TEMPLATE_SID_EN;
+  if (!sid) return res.status(400).json({ error: "No support template configured. Create an approved template in Twilio and set SUPPORT_TEMPLATE_SID_EN / SUPPORT_TEMPLATE_SID_AR." });
+  const fullNumber = "whatsapp:+" + phone;
+  try {
+    await client.messages.create({ from: fromNumber, to: fullNumber, contentSid: sid });
+    await db.execute(
+      "INSERT INTO messages (phone, sender, message) VALUES (?, 'agent', ?)",
+      [fullNumber, "[template message sent]"]
+    );
+    await db.execute(
+      "UPDATE conversations SET status = 'agent', last_seen = NOW() WHERE phone = ?",
+      [fullNumber]
+    );
+    broadcast();
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Send-template error:", err.message);
+    res.status(500).json({ error: "Failed to send template" });
+  }
+});
+ 
+// Proxy Twilio media — Twilio media URLs require account auth, so the
+// dashboard can't load them directly.
+app.get("/media/:id", requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).send("Bad id");
+  try {
+    const [rows] = await db.execute("SELECT media_url, media_type FROM messages WHERE id = ?", [id]);
+    if (!rows.length || !rows[0].media_url) return res.status(404).send("Not found");
+    if (!/^https:\/\/api\.twilio\.com\//.test(rows[0].media_url)) return res.status(400).send("Invalid media source");
+    const upstream = await fetch(rows[0].media_url, {
+      headers: { Authorization: "Basic " + Buffer.from(accountSid + ":" + authToken).toString("base64") }
+    });
+    if (!upstream.ok) return res.status(502).send("Failed to fetch media");
+    res.set("Content-Type", upstream.headers.get("content-type") || rows[0].media_type || "application/octet-stream");
+    res.set("Cache-Control", "private, max-age=86400");
+    res.send(Buffer.from(await upstream.arrayBuffer()));
+  } catch (err) {
+    console.error("Media proxy error:", err.message);
+    res.status(500).send("Error loading media");
+  }
+});
+ 
 const VALID_STATUSES = ["bot", "pending", "agent", "resolved"];
 app.post("/status", requireAuth, async (req, res) => {
   const { number, status } = req.body;
@@ -409,6 +547,7 @@ app.post("/status", requireAuth, async (req, res) => {
   }
   try {
     await db.execute("UPDATE conversations SET status = ? WHERE phone = ?", [status, number]);
+    broadcast();
     res.json({ success: true });
   } catch (err) {
     console.error("Status error:", err.message);
@@ -789,6 +928,8 @@ app.get("/dashboard", (req, res) => {
     "var currentLang='en';",
     "var authToken=localStorage.getItem('glamly_token')||'';",
     "var drafts={}; // unsent reply text per conversation, survives re-renders",
+    "var lastPendingCount=-1;",
+    "var eventSource=null;",
     "",
     "// Escape everything that goes into innerHTML — customer messages are",
     "// attacker-controlled and were previously stored XSS in this dashboard.",
@@ -819,6 +960,7 @@ app.get("/dashboard", (req, res) => {
     "}",
     "",
     "function doLogout(){",
+    "  if(eventSource){ eventSource.close(); eventSource=null; }",
     "  fetch('/logout',{method:'POST'});",
     "  authToken='';",
     "  localStorage.removeItem('glamly_token');",
@@ -830,6 +972,34 @@ app.get("/dashboard", (req, res) => {
     "  document.getElementById('loginScreen').style.display='none';",
     "  document.getElementById('app').style.display='flex';",
     "  loadConversations();",
+    "  initSSE();",
+    "  if(window.Notification && Notification.permission==='default') Notification.requestPermission();",
+    "}",
+    "",
+    "// Real-time: reload whenever the server broadcasts a change.",
+    "function initSSE(){",
+    "  if(eventSource) return;",
+    "  try{",
+    "    eventSource=new EventSource('/events');",
+    "    eventSource.onmessage=function(){ loadConversations(); };",
+    "  }catch(e){ /* polling fallback still runs */ }",
+    "}",
+    "",
+    "function playBeep(){",
+    "  try{",
+    "    var ctx=new (window.AudioContext||window.webkitAudioContext)();",
+    "    var o=ctx.createOscillator(); var g=ctx.createGain();",
+    "    o.connect(g); g.connect(ctx.destination);",
+    "    o.frequency.value=880; g.gain.value=0.08;",
+    "    o.start(); setTimeout(function(){ o.stop(); ctx.close(); },200);",
+    "  }catch(e){}",
+    "}",
+    "",
+    "function notifyNewPending(){",
+    "  playBeep();",
+    "  if(window.Notification && Notification.permission==='granted'){",
+    "    try{ new Notification('Glamly Support',{body:'New chat waiting for an agent'}); }catch(e){}",
+    "  }",
     "}",
     "",
     "function authHeaders(){",
@@ -876,7 +1046,7 @@ app.get("/dashboard", (req, res) => {
     "    else if(data.status==='resolved') resolved++;",
     "    if(currentFilter!=='all' && data.status!==currentFilter) continue;",
     "    var last=data.messages[data.messages.length-1];",
-    "    var preview=last?last.message.substring(0,40):'';",
+    "    var preview=last?(last.message||(last.hasMedia?'[Media]':'')).substring(0,40):'';",
     "    if(search && number.indexOf(search)===-1 && preview.toLowerCase().indexOf(search)===-1) continue;",
     "    var div=document.createElement('div');",
     "    div.className='conv-item'+(number===activeNumber?' active':'');",
@@ -890,6 +1060,8 @@ app.get("/dashboard", (req, res) => {
     "  document.getElementById('s-pending').textContent=pending;",
     "  document.getElementById('s-bot').textContent=bot;",
     "  document.getElementById('s-resolved').textContent=resolved;",
+    "  if(lastPendingCount>=0 && pending>lastPendingCount) notifyNewPending();",
+    "  lastPendingCount=pending;",
     "}",
     "",
     "function openConversation(number){",
@@ -907,7 +1079,15 @@ app.get("/dashboard", (req, res) => {
     "    var side=m.from==='customer'?'left':'right';",
     "    var who=m.from==='customer'?'Customer':m.from==='bot'?'Bot':'Agent';",
     "    var msgClass=m.from==='customer'?'customer':m.from==='bot'?'bot':'agent';",
-    "    msgsHtml += '<div class=\"msg-wrap '+side+'\"><div class=\"msg '+msgClass+'\">'+esc(m.message)+'</div><div class=\"msg-meta\">'+who+' - '+esc(new Date(m.time).toLocaleTimeString())+'</div></div>';",
+    "    var content='';",
+    "    if(m.hasMedia){",
+    "      var mt=m.mediaType||'';",
+    "      if(mt.indexOf('image/')===0) content+='<img src=\"/media/'+m.id+'\" style=\"max-width:200px;border-radius:8px;display:block;margin-bottom:4px\">';",
+    "      else if(mt.indexOf('audio/')===0) content+='<audio controls src=\"/media/'+m.id+'\" style=\"display:block;margin-bottom:4px;max-width:220px\"></audio>';",
+    "      else content+='<a href=\"/media/'+m.id+'\" target=\"_blank\">[Attachment]</a><br>';",
+    "    }",
+    "    content+=esc(m.message);",
+    "    msgsHtml += '<div class=\"msg-wrap '+side+'\"><div class=\"msg '+msgClass+'\">'+content+'</div><div class=\"msg-meta\">'+who+' - '+esc(new Date(m.time).toLocaleTimeString())+'</div></div>';",
     "  }",
     "",
     "  var qrHtml='';",
@@ -917,11 +1097,11 @@ app.get("/dashboard", (req, res) => {
     "  }",
     "",
     "  document.getElementById('chatArea').innerHTML =",
-    "    '<div class=\"chat-head\"><div class=\"ch-left\"><div class=\"avatar\">'+esc(num.slice(-2))+'</div><div><div class=\"ch-name\">+'+esc(num)+'</div><div class=\"ch-sub\">Status: '+esc(data.status)+'</div></div></div>'+",
+    "    '<div class=\"chat-head\"><div class=\"ch-left\"><div class=\"avatar\">'+esc(num.slice(-2))+'</div><div><div class=\"ch-name\">+'+esc(num)+'</div><div class=\"ch-sub\">Status: '+esc(data.status)+' | Lang: '+esc((data.lang||'ar').toUpperCase())+'</div></div></div>'+",
     "    '<div class=\"ch-actions\"><button class=\"act-btn\" onclick=\"lookupBooking()\">Booking lookup</button><button class=\"act-btn success\" onclick=\"markResolved(\\''+esc(number)+'\\')\">Mark resolved</button></div></div>'+",
     "    '<div class=\"messages\" id=\"messages\">'+msgsHtml+'</div>'+",
     "    '<div class=\"quick-replies\"><div class=\"qr-label\">Quick replies:</div>'+qrHtml+'</div>'+",
-    "    '<div class=\"reply-box\"><textarea id=\"replyInput\" placeholder=\"Type your reply...\" onkeydown=\"if(event.key===\\'Enter\\' && !event.shiftKey){event.preventDefault();sendReply();}\"></textarea><button class=\"send-btn\" onclick=\"sendReply()\">Send</button></div>';",
+    "    '<div class=\"reply-box\"><textarea id=\"replyInput\" placeholder=\"Type your reply...\" onkeydown=\"if(event.key===\\'Enter\\' && !event.shiftKey){event.preventDefault();sendReply();}\"></textarea><button class=\"act-btn\" onclick=\"sendTemplate()\" title=\"Use when the 24h WhatsApp window has closed\">Template</button><button class=\"send-btn\" onclick=\"sendReply()\">Send</button></div>';",
     "",
     "  // Restore the draft (and cursor) after the re-render",
     "  var newInput=document.getElementById('replyInput');",
@@ -957,6 +1137,20 @@ app.get("/dashboard", (req, res) => {
     "      return loadConversations().then(function(){ openConversation(activeNumber); });",
     "    })",
     "    .catch(function(){ alert('Failed to send message'); drafts[activeNumber]=message; var inp=document.getElementById('replyInput'); if(inp) inp.value=message; });",
+    "}",
+    "",
+    "// For chats outside the 24h window: send the approved re-engagement template.",
+    "function sendTemplate(){",
+    "  if(!activeNumber) return;",
+    "  if(!confirm('Send the re-engagement template to this customer?')) return;",
+    "  var lang=(conversations[activeNumber]&&conversations[activeNumber].lang)||'ar';",
+    "  fetch('/send-template',{method:'POST',headers:authHeaders(),body:JSON.stringify({to:activeNumber.replace('whatsapp:+',''),language:lang})})",
+    "    .then(function(res){ return res.json(); })",
+    "    .then(function(data){",
+    "      if(data && data.error){ alert(data.error); return; }",
+    "      return loadConversations();",
+    "    })",
+    "    .catch(function(){ alert('Failed to send template'); });",
     "}",
     "",
     "function markResolved(number){",
@@ -998,7 +1192,8 @@ app.get("/dashboard", (req, res) => {
     "}",
     "",
     "if(authToken) showApp();",
-    "setInterval(function(){ if(authToken) loadConversations(); }, 8000);",
+    "// Polling is now just a fallback — SSE delivers updates instantly.",
+    "setInterval(function(){ if(authToken) loadConversations(); }, 30000);",
     "</script>",
     "</body>",
     "</html>"
@@ -1009,3 +1204,4 @@ app.get("/dashboard", (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Glamly webhook running on port " + PORT));
 // v2.1 — draft preservation fix
+ 
