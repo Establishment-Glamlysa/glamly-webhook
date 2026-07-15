@@ -626,10 +626,11 @@ app.post("/create-gift", requireApiKey, async (req, res) => {
       from:             fromNumber,
       to:               "whatsapp:+" + input.phone,
       contentSid:       templateSid,
-      contentVariables: JSON.stringify({
+contentVariables: JSON.stringify({
         "1": input.senderName,
         "2": input.serviceName,
-        "3": input.salonName
+        "3": input.salonName,
+        "4": GIFT_BASE_URL + "/gift/" + giftCode
       })
     });
     res.json({ success: true, giftCode: giftCode, giftLink: giftLink });
@@ -688,13 +689,19 @@ app.get("/gift", (req, res) => {
   lines.push("var appOpened = false;");
   lines.push("window.addEventListener('blur', function(){ appOpened = true; });");
   lines.push("document.addEventListener('visibilitychange', function(){ if(document.hidden) appOpened = true; });");
-  lines.push("window.location.href = 'glamly://gift';");
-  lines.push("setTimeout(function(){");
-  lines.push("  if(!appOpened){");
-  lines.push("    document.getElementById('loading').classList.add('hidden');");
-  lines.push("    document.getElementById('fallback').classList.remove('hidden');");
-  lines.push("  }");
-  lines.push("}, 1500);");
+ lines.push("var code = new URLSearchParams(window.location.search).get('code');");
+lines.push("if(code){");
+lines.push("  window.location.href = 'glamly://gift/' + code;");
+lines.push("  setTimeout(function(){");
+lines.push("    if(!appOpened){");
+lines.push("      document.getElementById('loading').classList.add('hidden');");
+lines.push("      document.getElementById('fallback').classList.remove('hidden');");
+lines.push("    }");
+lines.push("  }, 1500);");
+lines.push("} else {");
+lines.push("  document.getElementById('loading').classList.add('hidden');");
+lines.push("  document.getElementById('fallback').classList.remove('hidden');");
+lines.push("}");
   lines.push("</script>");
   lines.push("</body>");
   lines.push("</html>");
