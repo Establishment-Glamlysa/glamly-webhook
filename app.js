@@ -321,7 +321,28 @@ app.post("/webhook", (req, res, next) => {
           "UPDATE conversations SET status = 'pending' WHERE phone = ?",
           [from]
         );
+             // Auto-greeting: one welcome message when a new chat arrives.
+// Set AUTO_GREETING=false in Railway to turn it off.
+const AUTO_GREETING = process.env.AUTO_GREETING !== "false";
+const GREETING = {
+  ar: "أهلاً بك في قلاملي 💜\nوصلتنا رسالتك، وسيتواصل معك أحد موظفينا في أقرب وقت.",
+  en: "Welcome to Glamly 💜\nWe've received your message — one of our agents will contact you shortly."
+};
                         if (currentStatus !== "pending") notifyAgents(from, message || "[media]");
+                     // Sent once per new/resolved chat — never repeated while waiting,
+        // and never while an agent is mid-conversation.
+        if (AUTO_GREETING && currentStatus !== "pending" && currentStatus !== "agent") {
+          const greeting = detectLang(message) === "en" ? GREETING.en : GREETING.ar;
+          await db.execute(
+            "INSERT INTO messages (phone, sender, message) VALUES (?, 'bot', ?)",
+            [from, greeting]
+          );
+          try {
+            await client.messages.create({ from: fromNumber, to: from, body: greeting });
+          } catch (sendErr) {
+            console.error("Greeting send failed:", sendErr.message);
+          }
+        }
       } else {
         const bot = getBotReply(message, lang);
         await db.execute(
