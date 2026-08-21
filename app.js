@@ -27,6 +27,8 @@ const DASH_PASS     = process.env.DASHBOARD_PASSWORD;
 const GIFT_API_KEY  = process.env.GIFT_API_KEY;
 const GIFT_BASE_URL = process.env.GIFT_BASE_URL || "https://gift.glamlysa.com";
 const IS_PROD       = process.env.NODE_ENV === "production";
+// Bot auto-reply switch: off unless BOT_ENABLED is explicitly "true"
+const BOT_ENABLED = process.env.BOT_ENABLED === "true";
  
 const app = express();
 // Required behind a reverse proxy (Railway/Heroku/etc.) so Twilio signature
@@ -314,12 +316,12 @@ app.post("/webhook", (req, res, next) => {
  
       // If an agent is already handling this chat (or it's waiting for one),
       // the bot stays quiet — the message is just stored and re-flagged.
-      if (currentStatus === "agent" || currentStatus === "pending") {
+            if (!BOT_ENABLED || currentStatus === "agent" || currentStatus === "pending")  {
         await db.execute(
           "UPDATE conversations SET status = 'pending' WHERE phone = ?",
           [from]
         );
-        if (currentStatus === "agent") notifyAgents(from, message || "[media]");
+                        if (currentStatus !== "pending") notifyAgents(from, message || "[media]");
       } else {
         const bot = getBotReply(message, lang);
         await db.execute(
