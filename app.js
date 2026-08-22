@@ -124,6 +124,7 @@ async function connectDB() {
       catch (e) { if (e.code !== "ER_DUP_FIELDNAME") throw e; }
     };
     await ensureColumn("conversations", "lang VARCHAR(5) DEFAULT 'ar'");
+    await ensureColumn("conversations", "greeted_at DATETIME NULL");
     await ensureColumn("messages", "media_url VARCHAR(512)");
     await ensureColumn("messages", "media_type VARCHAR(100)");
     console.log("Database connected!");
@@ -283,6 +284,11 @@ app.post("/webhook", (req, res, next) => {
   next();
 }, twilio.webhook({ validate: validateTwilio }, authToken), async (req, res) => {
   const from = req.body.From || "";
+
+  // Ignore anything the business number sends to itself — prevents loops.
+  if (from === fromNumber) {
+    return res.type("text/xml").send("<Response></Response>");
+  }
   const message = (req.body.Body || "").trim();
   // Media messages (images, voice notes): store the first attachment's URL
   // so the dashboard can display it via the /media proxy.
@@ -329,9 +335,17 @@ const GREETING = {
   en: "Welcome to Glamly 💜\nWe've received your message — one of our agents will contact you shortly."
 };
                         if (currentStatus !== "pending") notifyAgents(from, message || "[media]");
-                     // Sent once per new/resolved chat — never repeated while waiting,
-        // and never while an agent is mid-conversation.
-        if (AUTO_GREETING && currentStatus !== "pending" && currentStatus !== "agent") {
+                  // Claim the greeting atomically — the database itself guarantees
+        // one send per number, no matter how many messages arrive.
+        let mayGreet = false;
+        if (AUTO_GREETING && currentStatus !== "agent") {
+          const [claim] = await db.execute(
+            "UPDATE conversations SET greeted_at = NOW() WHERE phone = ? AND (greeted_at IS NULL OR greeted_at < (NOW() - INTERVAL 7 DAY))",
+            [from]
+          );
+          mayGreet = claim.affectedRows === 1;
+        }
+        if (mayGreet) {
           const greeting = detectLang(message) === "en" ? GREETING.en : GREETING.ar;
           await db.execute(
             "INSERT INTO messages (phone, sender, message) VALUES (?, 'bot', ?)",
